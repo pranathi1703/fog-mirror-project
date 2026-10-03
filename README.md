@@ -1,126 +1,107 @@
-\# Fog Mirror
+# ✨ Fog Mirror
 
+> A playful interactive virtual mirror that brings a fogged-glass experience to the browser using your webcam. 🌫️🪞
 
+<p align="center">
+  <a href="https://pranathi1703.github.io/fog-mirror-project/">
+    <strong>🌐 Live Demo →</strong>
+  </a>
+</p>
 
-An interactive webcam-based virtual mirror experience that simulates a fogged mirror and responds to user interactions.
+---
 
+## 💫 About
 
+**Fog Mirror** is an interactive webcam-based virtual mirror designed to simulate the experience of drawing and interacting with a fogged mirror.
 
-\## ✨ Features
+The project evolved through three versions, gradually adding richer interactions, recognition features, mirror modes, and UI polish.
 
+---
 
+## ✨ Features
 
-\### v1.0 — Initial Fog Mirror
+### 🌱 v1.0 — Initial Fog Mirror
 
+* 📷 Webcam integration
+* 🌫️ Fog simulation
+* 💨 Breath interaction
 
+### 🎨 v2.0 — Interactive Recognition
 
-\* Webcam integration
+* 🌫️ Advanced fog physics
+* 🖐️ Gesture interactions
+* 🔷 Shape recognition
 
-\* Fog simulation
+### 💎 v3.0 — Premium Mirror Experience
 
-\* Breath interaction
+* 🪞 Multiple mirror modes
+* 💭 Memory features
+* ✨ Premium user interface
+* ⚡ Performance improvements & polish
 
+---
 
+## 🛠️ Tech Stack
 
-\### v2.0 — Interactive Recognition
+| Technology           | Purpose                       |
+| -------------------- | ----------------------------- |
+| **HTML**             | Application structure         |
+| **CSS**              | Styling & animations          |
+| **JavaScript**       | Interactions & logic          |
+| **MediaDevices API** | Webcam access                 |
+| **Canvas API**       | Visual effects & interactions |
 
+---
 
+## 🌷 Project Versions
 
-\* Fog physics
+The project is maintained through separate Git branches:
 
-\* Advanced gesture interactions
+| Branch | Release        | Highlights                                |
+| ------ | -------------- | ----------------------------------------- |
+| `v1.0` | 🌱 Initial     | Webcam, fog & breath interaction          |
+| `v2.0` | 🎨 Interactive | Fog physics, gestures & shape recognition |
+| `v3.0` | 💎 Premium     | Mirror modes, memories & UI polish        |
+| `main` | ⭐ Stable       | Latest stable release                     |
 
-\* Shape recognition
+---
 
+## 🚀 Run Locally
 
-
-\### v3.0 — Premium Mirror Experience
-
-
-
-\* Multiple mirror modes
-
-\* Memory features
-
-\* Premium user interface
-
-\* Performance improvements and polish
-
-
-
-\## 🛠️ Tech Stack
-
-
-
-\* HTML
-
-\* CSS
-
-\* JavaScript
-
-\* Webcam / MediaDevices API
-
-\* Canvas API
-
-
-
-\## 📌 Project Versions
-
-
-
-The project is maintained using separate Git branches:
-
-
-
-| Branch | Version             | Description                                 |
-
-| ------ | ------------------- | ------------------------------------------- |
-
-| `v1.0` | Initial Release     | Webcam, fog and breath interaction          |
-
-| `v2.0` | Interactive Release | Fog physics, gestures and shape recognition |
-
-| `v3.0` | Latest Release      | Mirror modes, memories and premium UI       |
-
-| `main` | Stable              | Latest stable version                       |
-
-
-
-\## 🚀 Running the Project
-
-
-
-Clone the repository and open `fog.html` in a browser that supports webcam access.
-
-
+Clone the repository:
 
 ```bash
-
 git clone https://github.com/pranathi1703/fog-mirror-project.git
-
 cd fog-mirror-project
-
 ```
 
+Then open `fog.html` in a browser that supports webcam access and allow camera permissions when prompted. 📷
 
+---
 
-Then open `fog.html` in your browser and allow camera access when prompted.
-
-
-
-\## 📂 Project Structure
-
-
+## 📂 Project Structure
 
 ```text
-
 fog-mirror-project/
-
-├── fog.html
-
-└── README.md
-
+│
+├── 🌫️ fog.html
+└── 📖 README.md
 ```
 
+---
 
+## 🌐 Live Demo
 
+Try the latest version directly in your browser:
+
+<p align="center">
+  <a href="https://pranathi1703.github.io/fog-mirror-project/">
+    <strong>🪞 Open Fog Mirror</strong>
+  </a>
+</p>
+
+---
+
+<p align="center">
+  Made with ☕ + 💻 + a little bit of fog 🌫️
+</p>
