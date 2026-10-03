@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>fog — a mirror</title>
+<style>
+:root{color-scheme:dark}*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#17191b;font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;color:#f5f2ed}
+#stage{position:fixed;inset:0;background:#17191b}canvas{position:absolute;inset:0;width:100%;height:100%;display:block}video{display:none}
+#start{position:absolute;inset:0;z-index:5;display:grid;place-items:center;background:radial-gradient(ellipse at center,#303336,#17191b 72%);text-align:center;padding:24px}
+.panel{max-width:440px}.name{font-size:clamp(54px,12vw,94px);font-weight:200;letter-spacing:-.075em;margin:0 0 12px}.sub{font-size:14px;color:#c4c1bc;line-height:1.65;margin:0 auto 30px;max-width:340px}
+button{font:inherit;color:#fff;background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.38);border-radius:999px;padding:13px 25px;cursor:pointer;backdrop-filter:blur(14px)}button:hover{background:rgba(255,255,255,.18)}
+#error{color:#ffd2c8;min-height:24px;margin-top:18px;font-size:13px}
+#controls{position:absolute;z-index:3;left:16px;bottom:max(16px,env(safe-area-inset-bottom));display:flex;align-items:center;gap:12px;padding:9px 14px;border:1px solid rgba(255,255,255,.38);border-radius:999px;background:rgba(235,239,241,.13);backdrop-filter:blur(18px);box-shadow:0 4px 24px #0003}
+#controls label{font-size:12px;letter-spacing:.02em;color:#fff}#brush{width:clamp(100px,18vw,170px);accent-color:white;cursor:pointer}
+#shutter{position:absolute;z-index:3;right:20px;bottom:max(18px,env(safe-area-inset-bottom));width:54px;height:54px;padding:0;border:1px solid #ffffffb8;background:#ffffff20;display:grid;place-items:center}
+#shutter:before{content:"";width:20px;height:20px;border:2px solid white;border-radius:50%;box-shadow:0 0 12px #fff8}
+#hint{position:absolute;z-index:3;right:20px;top:18px;color:#ffffffa6;font-size:11px;letter-spacing:.04em;text-shadow:0 1px 5px #000}
+.hidden{display:none!important}
+</style>
+</head>
+<body>
+<div id="stage">
+  <video id="video" playsinline muted></video>
+  <canvas id="view"></canvas>
+  <div id="start"><div class="panel"><h1 class="name">fog</h1><p class="sub">A little breath, a little warmth.<br>Nothing is uploaded. Video and audio stay on this device.</p><button id="begin">step up to the mirror</button><div id="error" role="status"></div></div></div>
+  <div id="controls" class="hidden"><label for="brush">brush</label><input id="brush" type="range" min="7" max="38" value="15"></div>
+  <button id="shutter" class="hidden" aria-label="Save a photo" title="Save PNG"></button>
+  <div id="hint" class="hidden">SPACE fog · C clear · S save · ESC exit</div>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_detection@0.4.1646425229/face_detection.js"></script>
+<script>
+'use strict';
+(() => {
+const video=document.getElementById('video'), view=document.getElementById('view'), ctx=view.getContext('2d');
+const fog=document.createElement('canvas'), fogCtx=fog.getContext('2d');
+const frost=document.createElement('canvas'), frostCtx=frost.getContext('2d');
+const start=document.getElementById('start'), begin=document.getElementById('begin'), errorBox=document.getElementById('error');
+const controls=document.getElementById('controls'), shutter=document.getElementById('shutter'), hint=document.getElementById('hint'), brushSlider=document.getElementById('brush');
+let stream=null, hands=null, face=null, analyser=null, audioData=null, raf=0, frame=0, sending=false, active=false, space=false, lastKey=0;
+let W=0,H=0,D=1, breathFloor=.003, mouth={x:.5,y:.56}, smoothMouth={x:.5,y:.56};
+let rawPoint=null, brushPoint=null, starPoint=null, penDown=false, fistPrev=null, fistPoint=null, lostAt=0, releasedFrames=0;
+const dist=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y);
+const xy=l=>({x:(1-l.x)*W,y:l.y*H});
+function resize(){D=Math.min(window.devicePixelRatio||1,2);W=innerWidth;H=innerHeight;for(const c of [view,fog,frost]){c.width=Math.round(W*D);c.height=Math.round(H*D)}ctx.setTransform(D,0,0,D,0,0);fogCtx.setTransform(D,0,0,D,0,0);frostCtx.setTransform(D,0,0,D,0,0);fogCtx.globalCompositeOperation='source-over';fogCtx.fillStyle='rgba(255,255,255,.55)';fogCtx.fillRect(0,0,W,H)}
+function fogBlob(x,y,r,alpha){const g=fogCtx.createRadialGradient(x,y,0,x,y,r);g.addColorStop(0,`rgba(255,255,255,${alpha})`);g.addColorStop(1,'rgba(255,255,255,0)');fogCtx.save();fogCtx.filter=`blur(${r*.60}px)`;fogCtx.fillStyle=g;fogCtx.beginPath();fogCtx.arc(x,y,r,0,Math.PI*2);fogCtx.fill();fogCtx.restore()}
+function addBreath(strength){const reach=Math.min(W,H)*.43;for(let i=0;i<12;i++){const angle=Math.random()*Math.PI*2, rad=Math.sqrt(Math.random())*reach;const x=smoothMouth.x+Math.cos(angle)*rad*1.45;const y=smoothMouth.y+Math.sin(angle)*rad+reach*.12;const r=(.025+Math.random()*.07)*reach;fogBlob(x,y,r,.36*Math.max(.2,strength))}}
+function erase(x,y,r,amount=.6){fogCtx.save();fogCtx.globalCompositeOperation='destination-out';const g=fogCtx.createRadialGradient(x,y,0,x,y,r);g.addColorStop(0,`rgba(0,0,0,${amount})`);g.addColorStop(.72,`rgba(0,0,0,${amount*.75})`);g.addColorStop(1,'rgba(0,0,0,0)');fogCtx.fillStyle=g;fogCtx.beginPath();fogCtx.arc(x,y,r,0,Math.PI*2);fogCtx.fill();fogCtx.restore()}
+function curveErase(a,b,r){const mid={x:(a.x+b.x)/2,y:(a.y+b.y)/2};fogCtx.save();fogCtx.globalCompositeOperation='destination-out';fogCtx.lineCap='round';fogCtx.lineJoin='round';fogCtx.lineWidth=r*2;fogCtx.strokeStyle='rgba(0,0,0,.72)';fogCtx.beginPath();fogCtx.moveTo(a.x,a.y);fogCtx.quadraticCurveTo(a.x,a.y,mid.x,mid.y);fogCtx.quadraticCurveTo(b.x,b.y,b.x,b.y);fogCtx.stroke();fogCtx.restore()}
+function fistWipe(point,r){if(!fistPrev){erase(point.x,point.y,r,.34);fistPrev=point;return}const d=dist(point,fistPrev);if(d>W*.30){erase(point.x,point.y,r,.34)}else{const steps=Math.min(40,Math.max(1,Math.ceil(d/(r*.5))));for(let i=1;i<=steps;i++){const t=i/steps;erase(fistPrev.x+(point.x-fistPrev.x)*t,fistPrev.y+(point.y-fistPrev.y)*t,r,.34)}}fistPrev=point}
+function handResult(results){const lm=results.multiHandLandmarks?.[0];if(!lm){if(penDown){if(!lostAt)lostAt=performance.now();if(performance.now()-lostAt>250&&releasedFrames>=2)penDown=false}rawPoint=brushPoint=null;fistPrev=null;return}
+lostAt=0;const p=xy(lm[8]), wrist=xy(lm[0]), midKnuckle=xy(lm[9]), thumb=xy(lm[4]), indexKnuckle=xy(lm[5]), pinkyKnuckle=xy(lm[17]);
+const scale=Math.max(1,dist(wrist,midKnuckle)), pinch=dist(thumb,p)/scale;
+const curled=[[8,6],[12,10],[16,14],[20,18]].every(([tip,joint])=>dist(xy(lm[tip]),wrist)<dist(xy(lm[joint]),wrist));
+const indexExtended=dist(xy(lm[8]),wrist)>dist(xy(lm[6]),wrist);
+if(curled){const width=Math.max(dist(indexKnuckle,pinkyKnuckle),scale),r=width*1.6;fistWipe({x:(wrist.x+xy(lm[9]).x)/2,y:(wrist.y+xy(lm[9]).y)/2},r);penDown=false;fistPrev=fistPrev||p;return}else fistPrev=null;
+let next=penDown;if(pinch<.22)next=true;else if(pinch>.38){next=false;releasedFrames++}else releasedFrames=0;
+if(!penDown&&next&&!indexExtended)next=false;
+if(next){penDown=true;releasedFrames=0;const target=p;rawPoint=rawPoint?{x:rawPoint.x+(target.x-rawPoint.x)*.45,y:rawPoint.y+(target.y-rawPoint.y)*.45}:target;brushPoint=brushPoint?{x:brushPoint.x+(rawPoint.x-brushPoint.x)*.22,y:brushPoint.y+(rawPoint.y-brushPoint.y)*.22}:rawPoint;starPoint=starPoint?{x:starPoint.x+(p.x-starPoint.x)*.55,y:starPoint.y+(p.y-starPoint.y)*.55}:p;const r=Number(brushSlider.value);if(!handResult.last||dist(brushPoint,handResult.last)>=W*.0006){if(handResult.last)curveErase(handResult.last,brushPoint,r);else erase(brushPoint.x,brushPoint.y,r,.65)}handResult.last=brushPoint}
+else{penDown=false;handResult.last=null;rawPoint=brushPoint=null}
+}
+function faceResult(results){const d=results.detections?.[0];if(!d)return;const b=d.boundingBox;if(b){const target={x:(1-(b.xCenter||.5))*W,y:((b.yCenter||.45)+ (b.height||.3)*.28)*H};smoothMouth.x+=(target.x-smoothMouth.x)*.4;smoothMouth.y+=(target.y-smoothMouth.y)*.4}}
+function draw(){if(!active)return;frame++;const w=W,h=H;
+ctx.clearRect(0,0,w,h);ctx.save();ctx.translate(w,0);ctx.scale(-1,1);ctx.drawImage(video,0,0,w,h);ctx.restore();
+if(analyser&&audioData){analyser.getByteTimeDomainData(audioData);let peak=0;for(let i=0;i<audioData.length;i++)peak=Math.max(peak,Math.abs((audioData[i]-128)/128));if(peak<breathFloor)breathFloor+=(peak-breathFloor)*.05;else breathFloor+=(peak-breathFloor)*.0008;if(!penDown&&performance.now()-lastKey>300&&frame%2===0&&peak>breathFloor+.0025)addBreath(Math.min(1,(peak-(breathFloor+.0025))/.0005))}
+frostCtx.clearRect(0,0,w,h);frostCtx.save();frostCtx.filter='blur('+18*D+'px) brightness(1.18)';frostCtx.translate(w,0);frostCtx.scale(-1,1);frostCtx.drawImage(video,0,0,w,h);frostCtx.restore();frostCtx.filter='none';frostCtx.fillStyle='rgba(242,238,231,.62)';frostCtx.fillRect(0,0,w,h);frostCtx.globalCompositeOperation='destination-in';frostCtx.drawImage(fog,0,0,w,h);frostCtx.globalCompositeOperation='source-over';ctx.drawImage(frost,0,0,w,h);
+if(starPoint&&penDown){ctx.save();ctx.shadowColor='#fff';ctx.shadowBlur=16;ctx.fillStyle='#fff';ctx.beginPath();ctx.arc(starPoint.x,starPoint.y,2.3,0,Math.PI*2);ctx.fill();ctx.restore()}
+if(frame%5===0&&face&&!sending){sending=true;face.send({image:video}).catch(e=>{throw e}).finally(()=>sending=false)}
+if(frame%1===0&&hands&&!handResult.busy){handResult.busy=true;hands.send({image:video}).catch(e=>{throw e}).finally(()=>handResult.busy=false)}
+raf=requestAnimationFrame(draw)}
+async function startApp(){errorBox.textContent='';begin.disabled=true;try{if(!navigator.mediaDevices?.getUserMedia)throw new Error('Camera access requires HTTPS or localhost.');stream=await navigator.mediaDevices.getUserMedia({video:{width:{ideal:1280},height:{ideal:720},facingMode:'user'},audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}});video.srcObject=stream;await video.play();resize();const audioCtx=new (window.AudioContext||window.webkitAudioContext)();const source=audioCtx.createMediaStreamSource(stream);analyser=audioCtx.createAnalyser();analyser.fftSize=1024;source.connect(analyser);audioData=new Uint8Array(analyser.fftSize);
+hands=new Hands({locateFile:f=>`https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${f}`});hands.setOptions({maxNumHands:1,modelComplexity:1,minDetectionConfidence:.6,minTrackingConfidence:.55});hands.onResults(handResult);
+face=new FaceDetection({locateFile:f=>`https://cdn.jsdelivr.net/npm/@mediapipe/face_detection@0.4.1646425229/${f}`});face.setOptions({model:'short',minDetectionConfidence:.55});face.onResults(faceResult);
+active=true;start.classList.add('hidden');controls.classList.remove('hidden');shutter.classList.remove('hidden');hint.classList.remove('hidden');raf=requestAnimationFrame(draw)}catch(e){if(stream)stream.getTracks().forEach(t=>t.stop());stream=null;begin.disabled=false;errorBox.textContent=e.name==='NotAllowedError'?'Camera or microphone permission was refused. Please allow access and try again.':e.message||'Could not start the camera.';}}
+function save(){if(!active)return;const a=document.createElement('a');a.download='fog.png';a.href=view.toDataURL('image/png');a.click()}
+function exit(){active=false;cancelAnimationFrame(raf);if(stream)stream.getTracks().forEach(t=>t.stop());stream=null;start.classList.remove('hidden');controls.classList.add('hidden');shutter.classList.add('hidden');hint.classList.add('hidden');begin.disabled=false;errorBox.textContent=''}
+begin.addEventListener('click',startApp);shutter.addEventListener('click',save);window.addEventListener('resize',()=>{if(active)resize()});window.addEventListener('keydown',e=>{lastKey=performance.now();if(e.code==='Space'){e.preventDefault();space=true;if(active&&!penDown)addBreath(1)}if(e.key.toLowerCase()==='c'&&active){fogCtx.clearRect(0,0,W,H)}if(e.key.toLowerCase()==='s')save();if(e.key==='Escape'&&active)exit()});window.addEventListener('keyup',e=>{if(e.code==='Space')space=false});
+const originalDraw=draw;
+})();
+</script>
+</body></html>
