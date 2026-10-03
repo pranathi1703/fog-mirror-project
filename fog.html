@@ -34,20 +34,86 @@ button{font:inherit;color:#fff;background:rgba(255,255,255,.1);border:1px solid 
 'use strict';
 (() => {
 const video=document.getElementById('video'), view=document.getElementById('view'), ctx=view.getContext('2d');
-const fog=document.createElement('canvas'), fogCtx=fog.getContext('2d');
 const frost=document.createElement('canvas'), frostCtx=frost.getContext('2d');
 const start=document.getElementById('start'), begin=document.getElementById('begin'), errorBox=document.getElementById('error');
 const controls=document.getElementById('controls'), shutter=document.getElementById('shutter'), hint=document.getElementById('hint'), brushSlider=document.getElementById('brush');
-let stream=null, hands=null, face=null, analyser=null, audioData=null, raf=0, frame=0, sending=false, active=false, space=false, lastKey=0;
+let stream=null, hands=null, face=null, analyser=null, audioData=null, raf=0, frame=0, sending=false, active=false, space=false, lastKey=0, lastT=0;
 let W=0,H=0,D=1, breathFloor=.003, mouth={x:.5,y:.56}, smoothMouth={x:.5,y:.56};
 let rawPoint=null, brushPoint=null, starPoint=null, penDown=false, fistPrev=null, fistPoint=null, lostAt=0, releasedFrames=0;
 const dist=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y);
 const xy=l=>({x:(1-l.x)*W,y:l.y*H});
-function resize(){D=Math.min(window.devicePixelRatio||1,2);W=innerWidth;H=innerHeight;for(const c of [view,fog,frost]){c.width=Math.round(W*D);c.height=Math.round(H*D)}ctx.setTransform(D,0,0,D,0,0);fogCtx.setTransform(D,0,0,D,0,0);frostCtx.setTransform(D,0,0,D,0,0);fogCtx.globalCompositeOperation='source-over';fogCtx.fillStyle='rgba(255,255,255,.55)';fogCtx.fillRect(0,0,W,H)}
-function fogBlob(x,y,r,alpha){const g=fogCtx.createRadialGradient(x,y,0,x,y,r);g.addColorStop(0,`rgba(255,255,255,${alpha})`);g.addColorStop(1,'rgba(255,255,255,0)');fogCtx.save();fogCtx.filter=`blur(${r*.60}px)`;fogCtx.fillStyle=g;fogCtx.beginPath();fogCtx.arc(x,y,r,0,Math.PI*2);fogCtx.fill();fogCtx.restore()}
-function addBreath(strength){const reach=Math.min(W,H)*.43;for(let i=0;i<12;i++){const angle=Math.random()*Math.PI*2, rad=Math.sqrt(Math.random())*reach;const x=smoothMouth.x+Math.cos(angle)*rad*1.45;const y=smoothMouth.y+Math.sin(angle)*rad+reach*.12;const r=(.025+Math.random()*.07)*reach;fogBlob(x,y,r,.36*Math.max(.2,strength))}}
-function erase(x,y,r,amount=.6){fogCtx.save();fogCtx.globalCompositeOperation='destination-out';const g=fogCtx.createRadialGradient(x,y,0,x,y,r);g.addColorStop(0,`rgba(0,0,0,${amount})`);g.addColorStop(.72,`rgba(0,0,0,${amount*.75})`);g.addColorStop(1,'rgba(0,0,0,0)');fogCtx.fillStyle=g;fogCtx.beginPath();fogCtx.arc(x,y,r,0,Math.PI*2);fogCtx.fill();fogCtx.restore()}
-function curveErase(a,b,r){const mid={x:(a.x+b.x)/2,y:(a.y+b.y)/2};fogCtx.save();fogCtx.globalCompositeOperation='destination-out';fogCtx.lineCap='round';fogCtx.lineJoin='round';fogCtx.lineWidth=r*2;fogCtx.strokeStyle='rgba(0,0,0,.72)';fogCtx.beginPath();fogCtx.moveTo(a.x,a.y);fogCtx.quadraticCurveTo(a.x,a.y,mid.x,mid.y);fogCtx.quadraticCurveTo(b.x,b.y,b.x,b.y);fogCtx.stroke();fogCtx.restore()}
+
+/* ================= v2.0 FOG PHYSICS =================
+   Fog is a low-resolution density field (Float32Array, values 0..FOG_MAX), not a canvas bitmap.
+   Each frame: breath deposits moisture -> diffusion + slow drift -> per-cell dissipation.
+   The field is uploaded to a tiny canvas and bilinearly upscaled, which gives soft edges for free. */
+const FOG_MAX=.82;        // hard density ceiling so the mirror never becomes unusable
+const GRID_W=176;         // simulation columns (rows follow the aspect ratio)
+const DIFFUSE=.09;        // fraction of the neighbour-average gap closed per frame (slow spreading)
+const DRIFT_Y=.012;       // condensation slowly sags downward (pulls from the cell above)
+const DRIFT_X=.010;       // faint sideways creep, varying per row and slowly over time
+const DISSIPATE=.0016;    // base evaporation per frame (~7 s half-life); varied per cell
+const DRY_TIME=6;         // seconds a wiped patch resists re-fogging
+const BREATH_RANGE=.006;  // mic level above threshold that counts as a full-strength breath
+let GW=0,GH=0,cw=1,ch=1,dens,densNext,dry,grain,rate,rowPhase,rowWob;
+let densCanvas=document.createElement('canvas'), densCtx=densCanvas.getContext('2d'), densImg=null;
+let breathTime=0, lastBreathAt=0, breathEnv=0, simTime=0;
+
+// Smoothed random field normalised to 0..1: gives blotchy, non-repeating unevenness.
+function makeNoise(w,h,passes){const a=new Float32Array(w*h),b=new Float32Array(w*h);for(let i=0;i<a.length;i++)a[i]=Math.random();
+for(let p=0;p<passes;p++){for(let y=0;y<h;y++)for(let x=0;x<w;x++){const i=y*w+x;b[i]=(a[i]*2+a[x>0?i-1:i]+a[x<w-1?i+1:i]+a[y>0?i-w:i]+a[y<h-1?i+w:i])/6}a.set(b)}
+let lo=1,hi=0;for(let i=0;i<a.length;i++){if(a[i]<lo)lo=a[i];if(a[i]>hi)hi=a[i]}const s=1/Math.max(1e-6,hi-lo);for(let i=0;i<a.length;i++)a[i]=(a[i]-lo)*s;return a}
+
+// Allocate every buffer once per resize; nothing is allocated per frame afterwards.
+function initFog(){GW=GRID_W;GH=Math.max(40,Math.round(GW*H/W));cw=W/GW;ch=H/GH;
+dens=new Float32Array(GW*GH);densNext=new Float32Array(GW*GH);dry=new Float32Array(GW*GH);
+grain=makeNoise(GW,GH,3);const slow=makeNoise(GW,GH,8);rate=new Float32Array(GW*GH);
+for(let i=0;i<rate.length;i++)rate[i]=DISSIPATE*(.55+.9*slow[i]); // some regions evaporate faster than others
+rowPhase=new Float32Array(GH);rowWob=new Float32Array(GH);for(let y=0;y<GH;y++)rowPhase[y]=Math.random()*6.283;
+densCanvas.width=GW;densCanvas.height=GH;densImg=densCtx.createImageData(GW,GH);
+for(let i=0;i<GW*GH;i++){densImg.data[i*4]=densImg.data[i*4+1]=densImg.data[i*4+2]=255}}
+function clearFog(){if(dens){dens.fill(0);densNext.fill(0)}}
+
+// Add moisture as an elliptical gaussian. Density saturates toward FOG_MAX instead of adding linearly,
+// so repeated breaths accumulate but can never exceed the clamp. Static grain makes the deposit patchy.
+function deposit(cx,cy,sx,sy,amount){const gx=cx/cw,gy=cy/ch,rx=Math.max(1,sx/cw),ry=Math.max(1,sy/ch);
+const x0=Math.max(1,Math.floor(gx-rx*2.5)),x1=Math.min(GW-2,Math.ceil(gx+rx*2.5)),y0=Math.max(1,Math.floor(gy-ry*2.5)),y1=Math.min(GH-2,Math.ceil(gy+ry*2.5));
+for(let y=y0;y<=y1;y++)for(let x=x0;x<=x1;x++){const dx=(x-gx)/rx,dy=(y-gy)/ry,q=dx*dx+dy*dy;if(q>6.25)continue;const i=y*GW+x;
+const w=Math.exp(-q*.5)*amount*(.55+.9*grain[i])*(1-dry[i]);dens[i]+=(FOG_MAX-dens[i])*(w>1?1:w)}}
+
+// One breath "puff". s = strength 0..1, k = frame-time scale. A sustained breath (breathTime) widens the area.
+function addBreath(s,k=1){lastBreathAt=performance.now();breathTime+=k/60;
+const spread=Math.min(1,breathTime/1.6), reach=Math.min(W,H)*(.09+.09*s+.17*spread), amt=(.03+.13*s*s)*k, j=reach*.1;
+deposit(smoothMouth.x+(Math.random()-.5)*j,smoothMouth.y+reach*.12+(Math.random()-.5)*j,reach*1.35,reach*.9,amt); // dense core
+for(let n=0;n<2;n++){const a=Math.random()*6.283,r=Math.sqrt(Math.random())*reach*1.5; // irregular satellite patches
+deposit(smoothMouth.x+Math.cos(a)*r*1.3,smoothMouth.y+Math.sin(a)*r,reach*(.25+Math.random()*.3),reach*(.2+Math.random()*.3),amt*.5)}}
+
+// Advance the field one step: diffusion, gravity/side drift, dissipation. Linear scan over typed arrays, no allocation.
+function stepFog(dt){const k=dt*60;simTime+=dt;if(performance.now()-lastBreathAt>350)breathTime=0;
+for(let y=0;y<GH;y++)rowWob[y]=Math.sin(simTime*.35+rowPhase[y]);
+const dk=DIFFUSE*k,vy=DRIFT_Y*k,hx=DRIFT_X*k,dryStep=k/(DRY_TIME*60);
+for(let y=1;y<GH-1;y++){const wob=rowWob[y],aw=Math.abs(wob)*hx,dir=wob>0?-1:1;
+for(let x=1;x<GW-1;x++){const i=y*GW+x,c=dens[i];
+let dlt=dk*((dens[i-1]+dens[i+1]+dens[i-GW]+dens[i+GW])*.25-c)+vy*(dens[i-GW]-c)+aw*(dens[i+dir]-c);
+const dr=dry[i];if(dr>0){dry[i]=dr>dryStep?dr-dryStep:0;if(dlt>0)dlt*=1-dr} // freshly wiped glass resists re-fogging
+let n=c+dlt-rate[i]*(c+.12)*k; // evaporation: proportional + small constant so thin fog fully vanishes
+densNext[i]=n<.002?0:n>FOG_MAX?FOG_MAX:n}}
+for(let x=0;x<GW;x++){densNext[x]=densNext[GW+x]*.9;densNext[(GH-1)*GW+x]=densNext[(GH-2)*GW+x]*.9}
+for(let y=0;y<GH;y++){densNext[y*GW]=densNext[y*GW+1]*.9;densNext[y*GW+GW-1]=densNext[y*GW+GW-2]*.9}
+const t=dens;dens=densNext;densNext=t}
+
+// Upload density to the small canvas as alpha only (RGB was filled once in initFog).
+function renderFog(){const d=densImg.data;for(let i=0;i<dens.length;i++){const v=dens[i]*(.9+.2*grain[i])*255;d[i*4+3]=v>255?255:v}densCtx.putImageData(densImg,0,0)}
+
+// Clearing: soft-edged removal from the density field (same signatures as v1 so gesture code is untouched).
+function erase(x,y,r,amount=.6){const gx=x/cw,gy=y/ch,rx=Math.max(1.5,r/cw),ry=Math.max(1.5,r/ch);
+const x0=Math.max(0,Math.floor(gx-rx)),x1=Math.min(GW-1,Math.ceil(gx+rx)),y0=Math.max(0,Math.floor(gy-ry)),y1=Math.min(GH-1,Math.ceil(gy+ry));
+for(let yy=y0;yy<=y1;yy++)for(let xx=x0;xx<=x1;xx++){const dx=(xx-gx)/rx,dy=(yy-gy)/ry,q=Math.sqrt(dx*dx+dy*dy);if(q>=1)continue;
+const f=1-q,s=f*f*(3-2*f),i=yy*GW+xx;dens[i]*=1-Math.min(1,amount*s*1.4);if(s>dry[i])dry[i]=s}}
+function curveErase(a,b,r){const d=dist(a,b),steps=Math.min(60,Math.max(1,Math.ceil(d/(Math.min(cw,ch)*.7))));for(let i=1;i<=steps;i++){const t=i/steps;erase(a.x+(b.x-a.x)*t,a.y+(b.y-a.y)*t,r,.72)}}
+/* ================= end fog physics ================= */
+
+function resize(){D=Math.min(window.devicePixelRatio||1,2);W=innerWidth;H=innerHeight;for(const c of [view,frost]){c.width=Math.round(W*D);c.height=Math.round(H*D)}ctx.setTransform(D,0,0,D,0,0);frostCtx.setTransform(D,0,0,D,0,0);initFog()}
 function fistWipe(point,r){if(!fistPrev){erase(point.x,point.y,r,.34);fistPrev=point;return}const d=dist(point,fistPrev);if(d>W*.30){erase(point.x,point.y,r,.34)}else{const steps=Math.min(40,Math.max(1,Math.ceil(d/(r*.5))));for(let i=1;i<=steps;i++){const t=i/steps;erase(fistPrev.x+(point.x-fistPrev.x)*t,fistPrev.y+(point.y-fistPrev.y)*t,r,.34)}}fistPrev=point}
 function handResult(results){const lm=results.multiHandLandmarks?.[0];if(!lm){if(penDown){if(!lostAt)lostAt=performance.now();if(performance.now()-lostAt>250&&releasedFrames>=2)penDown=false}rawPoint=brushPoint=null;fistPrev=null;return}
 lostAt=0;const p=xy(lm[8]), wrist=xy(lm[0]), midKnuckle=xy(lm[9]), thumb=xy(lm[4]), indexKnuckle=xy(lm[5]), pinkyKnuckle=xy(lm[17]);
@@ -62,9 +128,17 @@ else{penDown=false;handResult.last=null;rawPoint=brushPoint=null}
 }
 function faceResult(results){const d=results.detections?.[0];if(!d)return;const b=d.boundingBox;if(b){const target={x:(1-(b.xCenter||.5))*W,y:((b.yCenter||.45)+ (b.height||.3)*.28)*H};smoothMouth.x+=(target.x-smoothMouth.x)*.4;smoothMouth.y+=(target.y-smoothMouth.y)*.4}}
 function draw(){if(!active)return;frame++;const w=W,h=H;
+const now=performance.now(),dt=Math.min(.05,(now-(lastT||now))/1000);lastT=now;
 ctx.clearRect(0,0,w,h);ctx.save();ctx.translate(w,0);ctx.scale(-1,1);ctx.drawImage(video,0,0,w,h);ctx.restore();
-if(analyser&&audioData){analyser.getByteTimeDomainData(audioData);let peak=0;for(let i=0;i<audioData.length;i++)peak=Math.max(peak,Math.abs((audioData[i]-128)/128));if(peak<breathFloor)breathFloor+=(peak-breathFloor)*.05;else breathFloor+=(peak-breathFloor)*.0008;if(!penDown&&performance.now()-lastKey>300&&frame%2===0&&peak>breathFloor+.0025)addBreath(Math.min(1,(peak-(breathFloor+.0025))/.0005))}
-frostCtx.clearRect(0,0,w,h);frostCtx.save();frostCtx.filter='blur('+18*D+'px) brightness(1.18)';frostCtx.translate(w,0);frostCtx.scale(-1,1);frostCtx.drawImage(video,0,0,w,h);frostCtx.restore();frostCtx.filter='none';frostCtx.fillStyle='rgba(242,238,231,.62)';frostCtx.fillRect(0,0,w,h);frostCtx.globalCompositeOperation='destination-in';frostCtx.drawImage(fog,0,0,w,h);frostCtx.globalCompositeOperation='source-over';ctx.drawImage(frost,0,0,w,h);
+// Breath: v1 detection (adaptive noise floor + threshold), now mapped to a smoothed 0..1 strength.
+let target=0;
+if(analyser&&audioData){analyser.getByteTimeDomainData(audioData);let peak=0;for(let i=0;i<audioData.length;i++)peak=Math.max(peak,Math.abs((audioData[i]-128)/128));if(peak<breathFloor)breathFloor+=(peak-breathFloor)*.05;else breathFloor+=(peak-breathFloor)*.0008;
+const excess=peak-(breathFloor+.0025);if(excess>0&&!penDown&&now-lastKey>300)target=Math.sqrt(Math.min(1,excess/BREATH_RANGE))}
+breathEnv+=(target-breathEnv)*(target>breathEnv?.35:.12);
+if(space&&!penDown)breathEnv=Math.max(breathEnv,.85); // holding SPACE = sustained breath
+if(breathEnv>.06)addBreath(breathEnv,dt*60);
+stepFog(dt);renderFog();
+frostCtx.clearRect(0,0,w,h);frostCtx.save();frostCtx.filter='blur('+18*D+'px) brightness(1.18)';frostCtx.translate(w,0);frostCtx.scale(-1,1);frostCtx.drawImage(video,0,0,w,h);frostCtx.restore();frostCtx.filter='none';frostCtx.fillStyle='rgba(242,238,231,.72)';frostCtx.fillRect(0,0,w,h);frostCtx.globalCompositeOperation='destination-in';frostCtx.imageSmoothingEnabled=true;frostCtx.imageSmoothingQuality='high';frostCtx.drawImage(densCanvas,0,0,w,h);frostCtx.globalCompositeOperation='source-over';ctx.drawImage(frost,0,0,w,h);
 if(starPoint&&penDown){ctx.save();ctx.shadowColor='#fff';ctx.shadowBlur=16;ctx.fillStyle='#fff';ctx.beginPath();ctx.arc(starPoint.x,starPoint.y,2.3,0,Math.PI*2);ctx.fill();ctx.restore()}
 if(frame%5===0&&face&&!sending){sending=true;face.send({image:video}).catch(e=>{throw e}).finally(()=>sending=false)}
 if(frame%1===0&&hands&&!handResult.busy){handResult.busy=true;hands.send({image:video}).catch(e=>{throw e}).finally(()=>handResult.busy=false)}
@@ -72,11 +146,10 @@ raf=requestAnimationFrame(draw)}
 async function startApp(){errorBox.textContent='';begin.disabled=true;try{if(!navigator.mediaDevices?.getUserMedia)throw new Error('Camera access requires HTTPS or localhost.');stream=await navigator.mediaDevices.getUserMedia({video:{width:{ideal:1280},height:{ideal:720},facingMode:'user'},audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}});video.srcObject=stream;await video.play();resize();const audioCtx=new (window.AudioContext||window.webkitAudioContext)();const source=audioCtx.createMediaStreamSource(stream);analyser=audioCtx.createAnalyser();analyser.fftSize=1024;source.connect(analyser);audioData=new Uint8Array(analyser.fftSize);
 hands=new Hands({locateFile:f=>`https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${f}`});hands.setOptions({maxNumHands:1,modelComplexity:1,minDetectionConfidence:.6,minTrackingConfidence:.55});hands.onResults(handResult);
 face=new FaceDetection({locateFile:f=>`https://cdn.jsdelivr.net/npm/@mediapipe/face_detection@0.4.1646425229/${f}`});face.setOptions({model:'short',minDetectionConfidence:.55});face.onResults(faceResult);
-active=true;start.classList.add('hidden');controls.classList.remove('hidden');shutter.classList.remove('hidden');hint.classList.remove('hidden');raf=requestAnimationFrame(draw)}catch(e){if(stream)stream.getTracks().forEach(t=>t.stop());stream=null;begin.disabled=false;errorBox.textContent=e.name==='NotAllowedError'?'Camera or microphone permission was refused. Please allow access and try again.':e.message||'Could not start the camera.';}}
+lastT=0;active=true;start.classList.add('hidden');controls.classList.remove('hidden');shutter.classList.remove('hidden');hint.classList.remove('hidden');raf=requestAnimationFrame(draw)}catch(e){if(stream)stream.getTracks().forEach(t=>t.stop());stream=null;begin.disabled=false;errorBox.textContent=e.name==='NotAllowedError'?'Camera or microphone permission was refused. Please allow access and try again.':e.message||'Could not start the camera.';}}
 function save(){if(!active)return;const a=document.createElement('a');a.download='fog.png';a.href=view.toDataURL('image/png');a.click()}
 function exit(){active=false;cancelAnimationFrame(raf);if(stream)stream.getTracks().forEach(t=>t.stop());stream=null;start.classList.remove('hidden');controls.classList.add('hidden');shutter.classList.add('hidden');hint.classList.add('hidden');begin.disabled=false;errorBox.textContent=''}
-begin.addEventListener('click',startApp);shutter.addEventListener('click',save);window.addEventListener('resize',()=>{if(active)resize()});window.addEventListener('keydown',e=>{lastKey=performance.now();if(e.code==='Space'){e.preventDefault();space=true;if(active&&!penDown)addBreath(1)}if(e.key.toLowerCase()==='c'&&active){fogCtx.clearRect(0,0,W,H)}if(e.key.toLowerCase()==='s')save();if(e.key==='Escape'&&active)exit()});window.addEventListener('keyup',e=>{if(e.code==='Space')space=false});
-const originalDraw=draw;
+begin.addEventListener('click',startApp);shutter.addEventListener('click',save);window.addEventListener('resize',()=>{if(active)resize()});window.addEventListener('keydown',e=>{lastKey=performance.now();if(e.code==='Space'){e.preventDefault();space=true;if(active&&!penDown&&!e.repeat)addBreath(1)}if(e.key.toLowerCase()==='c'&&active){clearFog()}if(e.key.toLowerCase()==='s')save();if(e.key==='Escape'&&active)exit()});window.addEventListener('keyup',e=>{if(e.code==='Space')space=false});
 })();
 </script>
 </body></html>
